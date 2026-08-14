@@ -165,7 +165,10 @@ export class ZeroEtlStack extends Stack {
       const enginePort: Record<string, number> = { mysql: 3306, postgres: 5432, oracle: 1521 };
       const engineSize: Record<string, ec2.InstanceSize> = {
         mysql: ec2.InstanceSize.SMALL,
-        postgres: ec2.InstanceSize.SMALL,
+        // medium: t4g.small capacity proved scarce across BOTH eu-central-1
+        // AZs on consecutive attempts (each error recommending the other
+        // AZ) -- the medium pool is deeper and PG is light anyway.
+        postgres: ec2.InstanceSize.MEDIUM,
         oracle: ec2.InstanceSize.LARGE,
       };
       // The demo table/schema each container is seeded with (see userData
@@ -232,7 +235,7 @@ export class ZeroEtlStack extends Stack {
           'docker run -d --name cdc-postgres --restart unless-stopped \\',
           '  -e POSTGRES_DB=inventory -e POSTGRES_USER=cdc -e POSTGRES_PASSWORD=cdcpw \\',
           '  -p 5432:5432 -v /opt/cdc/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro \\',
-          '  postgres:16 -c wal_level=logical -c max_wal_senders=10 -c max_replication_slots=10',
+          '  postgres:18 -c wal_level=logical -c max_wal_senders=10 -c max_replication_slots=10',
         );
       } else {
         // oracle — gvenzl/oracle-free (23ai). LogMiner CDC needs ARCHIVELOG mode +
@@ -271,13 +274,17 @@ export class ZeroEtlStack extends Stack {
 
       const dbInstance = new ec2.Instance(this, 'TestSourceDb', {
         vpc,
-        // Second AZ: eu-central-1a periodically runs out of t4g.small
-        // capacity (hit empirically 2026-08-13); 1b had capacity per the
-        // EC2 error guidance. Any single private subnet works -- the MSF
-        // app reaches it over the VPC network regardless of AZ.
+        // t4g capacity comes and goes per AZ (hit empirically in BOTH 1a and
+        // 1b on consecutive days) -- make the subnet pick context-overridable:
+        //   -c testSourceAz=0|1   (index into vpc.availabilityZones)
+        // Any single private subnet works; the MSF app reaches it across AZs.
         vpcSubnets: {
           subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS, // no public IP
-          availabilityZones: [vpc.availabilityZones[1]],
+          availabilityZones: [
+            vpc.availabilityZones[
+              Number(this.node.tryGetContext('testSourceAz') ?? 1)
+            ],
+          ],
         },
         instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, engineSize[engine]),
         machineImage: ec2.MachineImage.latestAmazonLinux2023({
