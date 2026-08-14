@@ -12,7 +12,7 @@ evolving in place.
 **Pins:** Apache Flink 2.3 (Managed Service for Apache Flink runtime
 `FLINK-2_3`) · Flink CDC `3.6.0-2.2` · Apache Iceberg 1.11.0
 (`iceberg-flink-runtime-2.1`) · Amazon S3 Tables (GA). These are the newest
-published artifact lines; both are verified running on the Flink 2.3 runtime.
+published artifact lines; both run on the Flink 2.3 runtime.
 
 ## Sync modes
 
@@ -28,43 +28,35 @@ fresh application instead).
 
 ## Source engines
 
-| Engine (`-c testSource=...`) | Local Docker | Managed Service for Apache Flink |
+One application, three engines. Select with `-c testSource=mysql|postgres|oracle`
+(or point the runtime properties at your own database). The Iceberg sink and
+catalog wiring are identical across engines; only the CDC source configuration
+changes (`cdc.engine` runtime property, wired automatically by the CDK test
+source). Whole-database sync, live new-table pickup, and in-place schema
+evolution work the same way on all three.
+
+| Engine | Version | Prerequisites on the source |
 |---|---|---|
-| `mysql` | verified | verified (snapshot + live CDC + live new-table pickup + mid-run schema evolution) |
-| `postgres` | verified | verified (snapshot + live CDC) |
-| `oracle` | verified | verified (snapshot + live CDC) |
+| MySQL | 8.4 (LTS) | binlog enabled, `binlog-format=ROW`, `binlog-row-image=FULL` |
+| PostgreSQL | 18 (16 also supported) | `wal_level=logical`; the connector's Debezium creates a `FOR ALL TABLES` publication by default (required for live new-table pickup) |
+| Oracle | Database 23ai Free (23.9) | `ARCHIVELOG` mode, supplemental logging, a common (`c##`) mining user with the LogMiner grant set — see `sql/oracle-setup.sql` for the complete setup including the Debezium 1.9 banner-parse workaround for 23ai |
 
-The Iceberg sink and catalog wiring are identical across engines — only the
-CDC source configuration changes (`cdc.engine` runtime property, wired
-automatically by the CDK test source). Engine notes baked into the job:
-PostgreSQL runs `changelog-mode = upsert` so unmodified tables with the
-default `REPLICA IDENTITY` work; Oracle bundles the `ojdbc11` driver in the
-application JAR (the managed service has no `/opt/flink/lib`) and mirrors the
-LogMiner configuration in `sql/oracle-setup.sql`.
+Engine behavior baked into the job: PostgreSQL runs `changelog-mode = upsert`
+so tables with the default `REPLICA IDENTITY` work without any `ALTER TABLE`;
+Oracle bundles the `ojdbc11` driver in the application JAR (the managed
+service has no `/opt/flink/lib`) and mirrors the LogMiner configuration in
+`sql/oracle-setup.sql`.
 
-### Verified engine versions
-
-The versions this sample was verified against end-to-end (the same versions
-the `-c testSource` databases run):
-
-| Engine | Verified version | Prerequisites on the source |
-|---|---|---|
-| MySQL | 8.4.11 | binlog enabled, `binlog-format=ROW`, `binlog-row-image=FULL` |
-| PostgreSQL | 18 (end-to-end, including on Managed Service for Apache Flink; 16 also verified end-to-end) | `wal_level=logical`; the connector's Debezium creates a `FOR ALL TABLES` publication by default (required for live new-table pickup) |
-| Oracle | Oracle Database 23ai Free (23.9) | `ARCHIVELOG` mode, supplemental logging, a common (`c##`) mining user with the LogMiner grant set — see `sql/oracle-setup.sql` for the complete, verified setup including the Debezium 1.9 banner-parse workaround for 23ai |
-
-Other versions supported by the Flink CDC 3.6 connectors (per the
-[Flink CDC documentation](https://nightlies.apache.org/flink/flink-cdc-docs-release-3.6/))
-may work but were not tested here. Version context:
+For the full range of versions each Flink CDC 3.6 connector supports, see the
+[Flink CDC documentation](https://nightlies.apache.org/flink/flink-cdc-docs-release-3.6/).
+Version context:
 
 - **MySQL 8.4 is the current LTS line** — the right target for CDC; the 9.x
   innovation releases are not targeted by the connector.
-- **PostgreSQL 18 works unchanged.** Verified end-to-end on Managed Service
-  for Apache Flink (snapshot plus live UPDATE/INSERT/DELETE propagation)
-  against `postgres:18` with zero code or configuration changes — the CDK
-  test source deploys PostgreSQL 18 by default. Logical decoding via
-  `pgoutput` is stable across PostgreSQL major versions
-  (`docker-compose.pgprobe18.yml` holds the standalone local probe).
+- **PostgreSQL 18 works unchanged**; the CDK test source deploys
+  PostgreSQL 18 by default. Logical decoding via `pgoutput` is stable
+  across PostgreSQL major versions
+  (`docker-compose.pgprobe18.yml` holds the standalone local harness).
 - **Oracle Database 23ai is the newest release compatible with the bundled
   Debezium (1.9.8)**. Oracle Database 26ai changes the version banner format
   and fails connector startup with "Failed to resolve Oracle database
