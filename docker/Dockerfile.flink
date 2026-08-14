@@ -1,0 +1,54 @@
+# Tier-A local Flink image for CDC -> Apache Iceberg.
+#
+# Runs on Apache Flink 2.3.0. No external connector publishes a native 2.3 build,
+# so we load the jars built against Flink 2.2 and rely on Flink 2.x @Public API
+# stability — empirically verified end-to-end (CDC snapshot + streaming
+# insert/update/delete into Iceberg, exactly-once checkpoints). Flink CDC 3.6.0
+# ships a -2.2 fat jar; Iceberg 1.11.0's newest Flink runtime is
+# iceberg-flink-runtime-2.1 (there is no -2.2/-2.3), and it loads on 2.3 the same
+# way. Managed Service for Apache Flink offers a FLINK-2_3 runtime (see the CDK
+# app), so both tiers run the same Flink 2.3 line.
+FROM flink:2.3.0-java17
+
+# Pinned coordinates, all verified present on repo1.maven.org.
+ARG MYSQL_CDC=3.6.0-2.2
+ARG PG_CDC=3.6.0-2.2
+ARG ORACLE_CDC=3.6.0-2.2
+ARG ICEBERG=1.11.0
+ARG HADOOP=3.4.3
+
+ENV MC=https://repo1.maven.org/maven2
+
+# Flink CDC SQL connectors (fat jars — bundle the Debezium engine).
+ADD ${MC}/org/apache/flink/flink-sql-connector-mysql-cdc/${MYSQL_CDC}/flink-sql-connector-mysql-cdc-${MYSQL_CDC}.jar        /opt/flink/lib/
+ADD ${MC}/org/apache/flink/flink-sql-connector-postgres-cdc/${PG_CDC}/flink-sql-connector-postgres-cdc-${PG_CDC}.jar        /opt/flink/lib/
+ADD ${MC}/org/apache/flink/flink-sql-connector-oracle-cdc/${ORACLE_CDC}/flink-sql-connector-oracle-cdc-${ORACLE_CDC}.jar    /opt/flink/lib/
+
+# JDBC drivers. The flink-sql-connector-*-cdc fat jars do NOT bundle the vendor
+# JDBC driver, but the incremental-snapshot path opens a JDBC connection and
+# loads com.mysql.cj.jdbc.Driver / org.postgresql.Driver by name — without these
+# the streaming INSERT fails with ClassNotFoundException at job submit.
+ADD ${MC}/com/mysql/mysql-connector-j/9.1.0/mysql-connector-j-9.1.0.jar /opt/flink/lib/
+ADD ${MC}/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar        /opt/flink/lib/
+ADD ${MC}/com/oracle/database/jdbc/ojdbc11/23.8.0.25.04/ojdbc11-23.8.0.25.04.jar /opt/flink/lib/
+
+# Iceberg Flink runtime + AWS bundle (S3FileIO, used for the real S3 Tables path;
+# harmless locally where MinIO stands in for S3). runtime-2.1 is the newest
+# published Iceberg Flink runtime and loads on Flink 2.3 via 2.x API stability.
+ADD ${MC}/org/apache/iceberg/iceberg-flink-runtime-2.1/${ICEBERG}/iceberg-flink-runtime-2.1-${ICEBERG}.jar                 /opt/flink/lib/
+ADD ${MC}/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG}/iceberg-aws-bundle-${ICEBERG}.jar                                /opt/flink/lib/
+
+# MANDATORY even with a REST catalog + S3FileIO and no HDFS anywhere:
+# org.apache.iceberg.flink.FlinkCatalogFactory.clusterHadoopConf() is called
+# unconditionally and needs org.apache.hadoop.conf.Configuration. Flink 2.x
+# ships no Hadoop, so without these CREATE CATALOG fails with
+#   NoClassDefFoundError: org/apache/hadoop/conf/Configuration
+# The shaded client jars relocate guava/jackson/commons under
+# org.apache.hadoop.shaded to avoid classpath conflicts.
+ADD ${MC}/org/apache/hadoop/hadoop-client-api/${HADOOP}/hadoop-client-api-${HADOOP}.jar         /opt/flink/lib/
+ADD ${MC}/org/apache/hadoop/hadoop-client-runtime/${HADOOP}/hadoop-client-runtime-${HADOOP}.jar /opt/flink/lib/
+
+# ADD leaves root-owned files; Flink runs as uid flink. Make them readable.
+USER root
+RUN chmod 644 /opt/flink/lib/*.jar
+USER flink

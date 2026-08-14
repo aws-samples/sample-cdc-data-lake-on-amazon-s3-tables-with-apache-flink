@@ -1,0 +1,75 @@
+Diagram:
+  DefinitionFiles:
+    - Type: URL
+      Url: https://raw.githubusercontent.com/awslabs/diagram-as-code/main/definitions/definition-for-aws-icons-light.yaml
+  Resources:
+    Canvas:
+      Type: AWS::Diagram::Canvas
+      Direction: horizontal
+      Children:
+        - SourceStack
+        - AWSCloud
+    SourceStack:
+      Type: AWS::Diagram::VerticalStack
+      Children:
+        - SourceDB
+    SourceDB:
+      Type: AWS::RDS::DBInstance
+      Title: Self-managed MySQL / PostgreSQL (binlog / WAL)
+    AWSCloud:
+      Type: AWS::Diagram::Cloud
+      Preset: AWSCloudNoLogo
+      Direction: horizontal
+      Children:
+        - Region
+    Region:
+      Type: AWS::Region
+      Direction: horizontal
+      Children:
+        - FlowStack
+    FlowStack:
+      Type: AWS::Diagram::HorizontalStack
+      Children:
+        - VPC
+        - S3Tables
+        - Athena
+    VPC:
+      Type: AWS::EC2::VPC
+      Title: VPC
+      Children:
+        - MSF
+    MSF:
+      Type: AWS::Diagram::Resource
+      Preset: "Amazon Managed Service for Apache Flink"
+      Title: Managed Service for Apache Flink (Flink CDC 3.6)
+    S3Tables:
+      Type: AWS::S3::Bucket
+      Title: Amazon S3 Tables (Apache Iceberg)
+    Athena:
+      Type: AWS::Athena
+      Title: Athena / Redshift / Spark / Trino
+  Links:
+    - Source: SourceDB
+      SourcePosition: E
+      Target: MSF
+      TargetPosition: W
+      Type: orthogonal
+      TargetArrowHead: {Type: Open}
+      Labels:
+        SourceRight: {Title: "CDC snapshot + changelog"}
+    - Source: MSF
+      SourcePosition: E
+      Target: S3Tables
+      TargetPosition: W
+      Type: orthogonal
+      TargetArrowHead: {Type: Open}
+      Labels:
+        SourceRight: {Title: "Iceberg REST (SigV4)"}
+    - Source: S3Tables
+      SourcePosition: E
+      Target: Athena
+      TargetPosition: W
+      Type: orthogonal
+      TargetArrowHead: {Type: Open}
+      Labels:
+        SourceRight: {Title: "query (no ETL)"}

@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.example.cdc</groupId>
+  <artifactId>cdc-to-iceberg</artifactId>
+  <version>1.0</version>
+  <packaging>jar</packaging>
+
+  <name>cdc-to-iceberg</name>
+  <description>
+    Managed Service for Apache Flink application: Flink CDC -> Apache Iceberg on
+    Amazon S3 Tables. Packaged fat jar consumed by the CDK app as
+    cdc-to-iceberg-1.0.jar. Mirrors sql/cdc_to_iceberg.sql exactly and pins the
+    same connector coordinates as docker/Dockerfile.flink (the coordinates this
+    sample was verified with end to end).
+  </description>
+
+  <!--
+    Version pins are deliberately identical to docker/Dockerfile.flink and the
+    README pin table. Do not bump one without the other: the whole point of the
+    blog is that the local (Docker) and cloud (MSF) tiers run the SAME jars.
+  -->
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>17</maven.compiler.release>
+
+    <flink.version>2.3.0</flink.version>
+    <mysql.cdc.version>3.6.0-2.2</mysql.cdc.version>
+    <iceberg.version>1.11.0</iceberg.version>
+    <hadoop.version>3.4.3</hadoop.version>
+    <mysql.connector.version>9.1.0</mysql.connector.version>
+    <kda.runtime.version>1.2.0</kda.runtime.version>
+
+    <shade.plugin.version>3.6.0</shade.plugin.version>
+    <main.class>com.example.cdc.CdcToIcebergJob</main.class>
+  </properties>
+
+  <dependencies>
+    <!-- ================================================================== -->
+    <!-- PROVIDED: MSF supplies the Flink runtime (2.3). These must NOT be    -->
+    <!-- shaded into the fat jar or they will clash with the platform's own   -->
+    <!-- Flink classes at runtime.                                            -->
+    <!-- ================================================================== -->
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-table-api-java-bridge</artifactId>
+      <version>${flink.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-table-planner-loader</artifactId>
+      <version>${flink.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-table-runtime</artifactId>
+      <version>${flink.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-streaming-java</artifactId>
+      <version>${flink.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-clients</artifactId>
+      <version>${flink.version}</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- ================================================================== -->
+    <!-- SHADED INTO THE FAT JAR (compile scope): everything MSF does NOT     -->
+    <!-- provide. Coordinates mirror docker/Dockerfile.flink 1:1.            -->
+    <!-- ================================================================== -->
+
+    <!-- Flink CDC MySQL SQL connector (fat jar: bundles the Debezium engine). -->
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-sql-connector-mysql-cdc</artifactId>
+      <version>${mysql.cdc.version}</version>
+    </dependency>
+
+    <!-- Flink CDC PostgreSQL SQL connector (fat jar: bundles Debezium
+         postgres engine + PostgresSourceBuilder). Used ONLY by the additive
+         pg-probe experiment mode; same coordinate scheme as the mysql one. -->
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-sql-connector-postgres-cdc</artifactId>
+      <version>${mysql.cdc.version}</version>
+    </dependency>
+
+    <!-- Flink CDC Oracle SQL connector (fat jar: bundles Debezium 1.9.8 +
+         LogMiner adapter). Used by the oracle branch of the single-table
+         path; same coordinate scheme as mysql/postgres. -->
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-sql-connector-oracle-cdc</artifactId>
+      <version>${mysql.cdc.version}</version>
+    </dependency>
+
+    <!-- Oracle JDBC driver. The oracle-cdc connector does NOT bundle it
+         (Oracle license), so locally it is dropped into /opt/flink/lib,
+         a directory that does not exist on Managed Service for Apache
+         Flink. There the driver must ride inside the application JAR, or
+         the job fails at source discovery with
+         "No suitable driver found for jdbc:oracle:thin:..." (hit
+         empirically on MSF 2026-08-13). Same version as the local
+         harness (docker/Dockerfile.flink). -->
+    <dependency>
+      <groupId>com.oracle.database.jdbc</groupId>
+      <artifactId>ojdbc11</artifactId>
+      <version>23.8.0.25.04</version>
+    </dependency>
+
+    <!-- MySQL JDBC driver. The -cdc fat jar does NOT bundle it, but the
+         incremental-snapshot path loads com.mysql.cj.jdbc.Driver by name.
+         Empirically-found bug: without this the streaming INSERT fails with
+         ClassNotFoundException at job submit. Same coordinate as the image. -->
+    <dependency>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <version>${mysql.connector.version}</version>
+    </dependency>
+
+    <!-- Iceberg Flink runtime (newest published: runtime-2.1, loads on 2.3
+         via 2.x @Public API stability). -->
+    <dependency>
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-flink-runtime-2.1</artifactId>
+      <version>${iceberg.version}</version>
+    </dependency>
+
+    <!-- Iceberg AWS bundle: S3FileIO + the AWS SDK v2 s3/sts/glue clients it
+         needs for the real S3 Tables path. The Docker image ships this same
+         jar separately, so shading it here mirrors what the image provides
+         (no separate software.amazon.awssdk s3/sts/auth jars needed). -->
+    <dependency>
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-aws-bundle</artifactId>
+      <version>${iceberg.version}</version>
+    </dependency>
+
+    <!-- MANDATORY even with a REST catalog and no HDFS:
+         org.apache.iceberg.flink.FlinkCatalogFactory.clusterHadoopConf() loads
+         org.apache.hadoop.conf.Configuration unconditionally. Flink 2.x ships
+         no Hadoop, so CREATE CATALOG fails with NoClassDefFoundError without
+         these. Same version as the image (3.4.3). -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client-api</artifactId>
+      <version>${hadoop.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client-runtime</artifactId>
+      <version>${hadoop.version}</version>
+    </dependency>
+
+    <!-- MSF runtime properties API (KinesisAnalyticsRuntime.getApplicationProperties). -->
+    <dependency>
+      <groupId>com.amazonaws</groupId>
+      <artifactId>aws-kinesisanalytics-runtime</artifactId>
+      <version>${kda.runtime.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>cdc-to-iceberg-1.0</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>${shade.plugin.version}</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <filters>
+                <filter>
+                  <!-- Drop signature files from shaded jars: leaving them in a
+                       repackaged jar triggers SecurityException at class load. -->
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                    <exclude>module-info.class</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+              <transformers>
+                <!-- CRITICAL for Flink: merges META-INF/services/* so all the
+                     connector Factory / TableFactory SPI entries survive the
+                     shade (mysql-cdc + iceberg + planner factories). -->
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>${main.class}</mainClass>
+                </transformer>
+              </transformers>
+              <!-- MSF classloading fix (mirrors aws-samples/sample-streaming-
+                   data-lake-with-apache-iceberg-and-apache-flink): Iceberg's
+                   FlinkCatalogFactory.clusterHadoopConf() resolves Flink's
+                   HadoopUtils through the PARENT classloader on Managed
+                   Service for Apache Flink, where no Hadoop exists ->
+                   NoClassDefFoundError: org.apache.hadoop.conf.Configuration
+                   at CREATE CATALOG, even though Hadoop is inside this jar.
+                   Fix: vendor a modified HadoopUtils (src/main/java/org/
+                   apache/flink/runtime/util/HadoopUtils.java) returning
+                   new Configuration(false), then relocate it together with
+                   org.apache.hadoop.conf so every reference resolves inside
+                   this jar. AWS SDK v2 is relocated too, avoiding conflicts
+                   with the MSF-provided SDK. -->
+              <relocations>
+                <relocation>
+                  <pattern>org.apache.hadoop.conf</pattern>
+                  <shadedPattern>shaded.org.apache.hadoop.conf</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>org.apache.flink.runtime.util.HadoopUtils</pattern>
+                  <shadedPattern>shaded.org.apache.flink.runtime.util.HadoopUtils</shadedPattern>
+                </relocation>
+                <relocation>
+                  <pattern>software.amazon.awssdk</pattern>
+                  <shadedPattern>shaded.software.amazon.awssdk</shadedPattern>
+                </relocation>
+              </relocations>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

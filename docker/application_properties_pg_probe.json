@@ -1,0 +1,29 @@
+[
+  {
+    "PropertyGroupId": "iceberg",
+    "PropertyMap": {
+      "catalog.uri": "http://unused:8181",
+      "catalog.warehouse": "s3://warehouse/",
+      "catalog.rest.sigv4-enabled": "false",
+      "catalog.rest.signing-name": "s3tables",
+      "catalog.namespace": "lakehouse",
+      "catalog.format-version": "2"
+    }
+  },
+  {
+    "PropertyGroupId": "cdc",
+    "PropertyMap": {
+      "hostname": "postgres",
+      "port": "5432",
+      "database-name": "inventory",
+      "table-name": "products",
+      "username": "postgres",
+      "password": "postgrespw",
+      "mode": "pg-probe",
+      "schema-name": "public",
+      "slot-name": "flink_pg_probe",
+      "decoding.plugin.name": "pgoutput",
+      "scan.newly-added-table.enabled": "false"
+    }
+  }
+]

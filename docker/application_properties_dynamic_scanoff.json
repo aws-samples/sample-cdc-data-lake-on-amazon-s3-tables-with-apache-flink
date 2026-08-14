@@ -1,0 +1,31 @@
+[
+  {
+    "PropertyGroupId": "iceberg",
+    "PropertyMap": {
+      "catalog.uri": "http://iceberg-rest:8181",
+      "catalog.warehouse": "s3://warehouse/",
+      "catalog.rest.sigv4-enabled": "false",
+      "catalog.rest.signing-name": "s3tables",
+      "catalog.namespace": "lakehouse",
+      "catalog.format-version": "2",
+      "catalog.s3.endpoint": "http://minio:9000",
+      "catalog.s3.path-style-access": "true",
+      "catalog.s3.access-key-id": "minioadmin",
+      "catalog.s3.secret-access-key": "minioadmin"
+    }
+  },
+  {
+    "PropertyGroupId": "cdc",
+    "PropertyMap": {
+      "hostname": "mysql",
+      "port": "3306",
+      "database-name": "inventory",
+      "table-name": "orders",
+      "username": "cdc",
+      "password": "cdcpw",
+      "mode": "dynamic",
+      "server-id": "5500-5504",
+      "scan.newly-added-table.enabled": "false"
+    }
+  }
+]

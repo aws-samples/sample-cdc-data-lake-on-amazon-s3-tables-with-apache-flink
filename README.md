@@ -1,93 +1,105 @@
-# sample-cdc-data-lake-on-amazon-s3-tables-with-apache-flink
+# Build a zero-ETL data lake on Amazon S3 Tables with Flink CDC
 
+Companion code for the blog post *"Build a zero-ETL data lake on Amazon S3
+Tables with Flink CDC"*. One streaming application on Amazon Managed Service
+for Apache Flink reads a self-managed database's change log directly and keeps
+Apache Iceberg tables on Amazon S3 Tables continuously in sync: whole-database
+capture, tables created on the fly, new tables picked up live, and schemas
+evolving in place.
 
+![Architecture](diagrams/architecture.png)
 
-## Getting started
+**Pins:** Apache Flink 2.3 (Managed Service for Apache Flink runtime
+`FLINK-2_3`) · Flink CDC `3.6.0-2.2` · Apache Iceberg 1.11.0
+(`iceberg-flink-runtime-2.1`) · Amazon S3 Tables (GA). These are the newest
+published artifact lines; both are verified running on the Flink 2.3 runtime.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## Sync modes
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+| Mode (`-c cdcMode=...`) | What it does | When to use |
+|---|---|---|
+| `dynamic` | Whole-schema sync via Iceberg's `DynamicIcebergSink`: captures every table, creates Iceberg targets on the fly, picks up new tables live, evolves schemas in place | Mirror the whole database with zero per-table wiring (the blog's walkthrough) |
+| `single` (default) | Table API job with explicitly declared source and target, one SQL `INSERT` in a statement set | Curated tables: exact declared types, SQL transforms, chosen subset |
 
-## Add your files
+Two rules when switching modes: give each mode its **own Iceberg namespace**
+(`-c icebergNamespace=...` — their schema/type mappings differ), and never
+restore one mode's job from the other's snapshot (use `-c appName=...` for a
+fresh application instead).
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Source engines
 
+| Engine (`-c testSource=...`) | Local Docker | Managed Service for Apache Flink |
+|---|---|---|
+| `mysql` | verified | verified (snapshot + live CDC + live new-table pickup + mid-run schema evolution) |
+| `postgres` | verified | verified (snapshot + live CDC) |
+| `oracle` | verified | verified (snapshot + live CDC) |
+
+The Iceberg sink and catalog wiring are identical across engines — only the
+CDC source configuration changes (`cdc.engine` runtime property, wired
+automatically by the CDK test source). Engine notes baked into the job:
+PostgreSQL runs `changelog-mode = upsert` so unmodified tables with the
+default `REPLICA IDENTITY` work; Oracle bundles the `ojdbc11` driver in the
+application JAR (the managed service has no `/opt/flink/lib`) and mirrors the
+LogMiner configuration in `sql/oracle-setup.sql`.
+
+## Deploy on AWS
+
+Prerequisites: AWS CDK v2, Node.js 18+, Java 11+ with Maven, an AWS account
+in a Region where S3 Tables is available.
+
+```bash
+cd app && mvn package && cd ..
+cd cdk && npm install
+
+# Review what will be created (no resources touched):
+npx cdk synth -c cdcMode=dynamic -c testSource=mysql
+
+# Deploy (creates billable resources: the Flink application, a NAT gateway,
+# an S3 Tables bucket, and an EC2 test database):
+npx cdk deploy -c cdcMode=dynamic -c testSource=mysql
 ```
-cd existing_repo
-git remote add origin https://gitlab.aws.dev/aws-wwso-streaming/sample-cdc-data-lake-on-amazon-s3-tables-with-apache-flink.git
-git branch -M main
-git push -uf origin main
+
+Omit `-c testSource` and pass `-c cdcHostname/-c cdcPort/-c cdcDatabase/...`
+to point at your own database instead. Context flags: `cdcMode`
+(`single|dynamic`), `testSource` (`mysql|postgres|oracle`), `icebergNamespace`,
+`appName`, `tableBucketName`.
+
+### Verify
+
+Query the synced tables from Amazon Athena (the S3 Tables catalog appears
+through the AWS Glue Data Catalog federation):
+
+```sql
+SELECT * FROM "s3tablescatalog/zero-etl-lakehouse"."lakehouse"."orders" ORDER BY 1;
 ```
 
-## Integrate with your tools
+Mutate the source (connect to the test instance with AWS Systems Manager
+Session Manager) and watch changes, new tables, and `ALTER TABLE` schema
+changes propagate. When piping SQL into the database container, remember
+`docker exec -i` (stdin) — and Oracle needs an explicit `COMMIT`.
 
-- [ ] [Set up project integrations](https://gitlab.aws.dev/aws-wwso-streaming/sample-cdc-data-lake-on-amazon-s3-tables-with-apache-flink/-/settings/integrations)
+## Run locally (optional)
 
-## Collaborate with your team
+A Docker Compose harness (database + MinIO + Iceberg REST catalog + Flink 2.3)
+mirrors the AWS deployment one-for-one, because S3 Tables speaks the open
+Iceberg REST protocol: `docker compose -f docker-compose.yml up -d` for the
+single-table SQL walkthrough, `docker-compose.dynamic.yml` for whole-schema
+mode. See the compose files for details.
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+## Cleanup
 
-## Test and Deploy
+```bash
+cd cdk && npx cdk destroy
+```
 
-Use the built-in continuous integration in GitLab.
+Confirm the S3 Tables bucket is deleted to avoid incurring ongoing charges
+for stored data.
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+## Security
 
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more
+information.
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+This library is licensed under the MIT-0 License. See the LICENSE file.

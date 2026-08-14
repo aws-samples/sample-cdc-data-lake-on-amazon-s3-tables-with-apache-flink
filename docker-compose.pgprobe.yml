@@ -1,0 +1,70 @@
+# PostgreSQL new-table live-pickup probe. postgres:16 with wal_level=logical,
+# same application-mode Flink launch as the dynamic harness but running the
+# additive pg-probe mode (print sink, no Iceberg/MinIO needed).
+name: zero-etl-cdc-pgprobe
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: cdcpg-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: inventory
+      POSTGRES_PASSWORD: postgrespw
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    ports: ["5434:5432"]
+    volumes:
+      - ./docker/seed_pg_probe.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d inventory"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  jobmanager:
+    image: flink:2.3.0-java17
+    container_name: cdcpg-jobmanager
+    command: standalone-job --job-classname com.example.cdc.CdcToIcebergJob
+    depends_on:
+      postgres: {condition: service_healthy}
+    ports: ["8094:8081"]
+    environment:
+      - AWS_REGION=eu-central-1
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        rest.address: 0.0.0.0
+        rest.bind-address: 0.0.0.0
+        execution.checkpointing.interval: 5s
+        state.backend.type: rocksdb
+        taskmanager.numberOfTaskSlots: 2
+        parallelism.default: 1
+    volumes:
+      - ./app/target/cdc-to-iceberg-1.0.jar:/opt/flink/usrlib/cdc-to-iceberg-1.0.jar:ro
+      - ./docker/application_properties_pg_probe.json:/etc/flink/application_properties.json:ro
+
+  taskmanager:
+    image: flink:2.3.0-java17
+    container_name: cdcpg-taskmanager
+    command: taskmanager
+    depends_on:
+      jobmanager: {condition: service_started}
+    environment:
+      - AWS_REGION=eu-central-1
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        taskmanager.memory.process.size: 2560m
+        state.backend.type: rocksdb
+        parallelism.default: 1
+    volumes:
+      - ./app/target/cdc-to-iceberg-1.0.jar:/opt/flink/usrlib/cdc-to-iceberg-1.0.jar:ro
+      - ./docker/application_properties_pg_probe.json:/etc/flink/application_properties.json:ro
