@@ -409,7 +409,12 @@ export class ZeroEtlStack extends Stack {
                 // (e.g. decimal -> string) collide with tables the Table API
                 // mode created (Cannot change column type) if they share one.
                 'catalog.namespace': cdcCtx('icebergNamespace', 'lakehouse'),
-                'catalog.format-version': '2',
+                // Iceberg table format version. Default v2: readable today by
+                // Athena, Redshift, Spark, Trino, and Flink. S3 Tables also
+                // supports v3 (deletion vectors + Variant) -- opt in with
+                // -c formatVersion=3 once every query engine you use reads
+                // v3; the upgrade is one-way.
+                'catalog.format-version': cdcCtx('formatVersion', '2'),
               },
             },
             {

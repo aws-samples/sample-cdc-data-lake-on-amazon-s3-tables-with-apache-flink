@@ -42,6 +42,38 @@ default `REPLICA IDENTITY` work; Oracle bundles the `ojdbc11` driver in the
 application JAR (the managed service has no `/opt/flink/lib`) and mirrors the
 LogMiner configuration in `sql/oracle-setup.sql`.
 
+### Verified engine versions
+
+The versions this sample was verified against end-to-end (the same versions
+the `-c testSource` databases run):
+
+| Engine | Verified version | Prerequisites on the source |
+|---|---|---|
+| MySQL | 8.4.11 | binlog enabled, `binlog-format=ROW`, `binlog-row-image=FULL` |
+| PostgreSQL | 16 | `wal_level=logical`; the connector's Debezium creates a `FOR ALL TABLES` publication by default (required for live new-table pickup) |
+| Oracle | Oracle Database 23ai Free (23.9) | `ARCHIVELOG` mode, supplemental logging, a common (`c##`) mining user with the LogMiner grant set — see `sql/oracle-setup.sql` for the complete, verified setup including the Debezium 1.9 banner-parse workaround for 23ai |
+
+Other versions supported by the Flink CDC 3.6 connectors (per the
+[Flink CDC documentation](https://nightlies.apache.org/flink/flink-cdc-docs-release-3.6/))
+may work but were not tested here.
+
+### Iceberg table format versions
+
+Amazon S3 Tables supports Iceberg format **v2 and v3**. This sample creates
+tables as **v2** by default because v2 is readable today by Amazon Athena,
+Amazon Redshift, Apache Spark, Trino, and Flink. Format version is a table
+property, independent of the Flink or Iceberg library version — the bundled
+`iceberg-flink-runtime-2.1:1.11.0` writes either.
+
+```bash
+# Opt in to format v3 (deletion vectors + Variant type):
+npx cdk deploy -c cdcMode=dynamic -c testSource=mysql -c formatVersion=3
+```
+
+Verify that every query engine you use reads v3 before opting in — the
+upgrade is one-way, and it applies to tables created after the change (it
+does not migrate existing tables).
+
 ## Deploy on AWS
 
 Prerequisites: AWS CDK v2, Node.js 18+, Java 11+ with Maven, an AWS account
@@ -62,7 +94,7 @@ npx cdk deploy -c cdcMode=dynamic -c testSource=mysql
 Omit `-c testSource` and pass `-c cdcHostname/-c cdcPort/-c cdcDatabase/...`
 to point at your own database instead. Context flags: `cdcMode`
 (`single|dynamic`), `testSource` (`mysql|postgres|oracle`), `icebergNamespace`,
-`appName`, `tableBucketName`.
+`appName`, `tableBucketName`, `formatVersion` (`2|3`, default `2`).
 
 ### Verify
 
