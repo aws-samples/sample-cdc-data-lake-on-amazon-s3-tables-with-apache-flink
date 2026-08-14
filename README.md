@@ -50,12 +50,24 @@ the `-c testSource` databases run):
 | Engine | Verified version | Prerequisites on the source |
 |---|---|---|
 | MySQL | 8.4.11 | binlog enabled, `binlog-format=ROW`, `binlog-row-image=FULL` |
-| PostgreSQL | 16 | `wal_level=logical`; the connector's Debezium creates a `FOR ALL TABLES` publication by default (required for live new-table pickup) |
+| PostgreSQL | 16 (end-to-end, including on Managed Service for Apache Flink) and 18.6 (local connector verification: snapshot, live CDC, live new-table pickup) | `wal_level=logical`; the connector's Debezium creates a `FOR ALL TABLES` publication by default (required for live new-table pickup) |
 | Oracle | Oracle Database 23ai Free (23.9) | `ARCHIVELOG` mode, supplemental logging, a common (`c##`) mining user with the LogMiner grant set — see `sql/oracle-setup.sql` for the complete, verified setup including the Debezium 1.9 banner-parse workaround for 23ai |
 
 Other versions supported by the Flink CDC 3.6 connectors (per the
 [Flink CDC documentation](https://nightlies.apache.org/flink/flink-cdc-docs-release-3.6/))
-may work but were not tested here.
+may work but were not tested here. Version context:
+
+- **MySQL 8.4 is the current LTS line** — the right target for CDC; the 9.x
+  innovation releases are not targeted by the connector.
+- **PostgreSQL 18 works unchanged.** The connector was verified against
+  PostgreSQL 18.6 with zero code or configuration changes (see
+  `docker-compose.pgprobe18.yml`); logical decoding via `pgoutput` is stable
+  across PostgreSQL major versions.
+- **Oracle Database 23ai is the newest release compatible with the bundled
+  Debezium (1.9.8)**. Oracle Database 26ai changes the version banner format
+  and fails connector startup with "Failed to resolve Oracle database
+  version" — pin your image accordingly (this repository pins
+  `gvenzl/oracle-free:23.9-slim` for exactly this reason).
 
 ### Iceberg table format versions
 
