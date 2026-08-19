@@ -167,7 +167,7 @@ def render_drawio(out):
            f'pageWidth="{W}" pageHeight="{H}"><root>'
            '<mxCell id="0"/><mxCell id="1" parent="0"/>'
            + "".join(cells) + "</root></mxGraphModel></diagram></mxfile>")
-    with open(out, "w") as f:
+    with open(out, "w", encoding="utf-8") as f:
         f.write(xml)
     print(f"wrote {out} ({os.path.getsize(out)//1024} KB)")
 

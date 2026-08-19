@@ -1,5 +1,10 @@
 # Tier-A local Flink image for CDC -> Apache Iceberg.
 #
+# checkov:skip=CKV_DOCKER_4: ADD is intentional -- it fetches connector jars from
+#   remote Maven Central URLs, which COPY does not support.
+# checkov:skip=CKV_DOCKER_2: local development/build image, not a long-running
+#   service; a HEALTHCHECK adds no value here.
+#
 # Runs on Apache Flink 2.3.0. No external connector publishes a native 2.3 build,
 # so we load the jars built against Flink 2.2 and rely on Flink 2.x @Public API
 # stability — empirically verified end-to-end (CDC snapshot + streaming
