@@ -352,10 +352,17 @@ export class ZeroEtlStack extends Stack {
           port: String(testDbPort!),
           'database-name': testDbDatabase!,
           'table-name': testDbTable!,
+          // -c cdcSecretArn also works with a test source: store the seeded
+          // credentials (below) in the secret and the app reads them from
+          // Secrets Manager instead of these runtime properties.
           // Oracle LogMiner requires the COMMON mining user (c##cdc) created
           // in the CDB root -- the PDB-local app user cannot run LogMiner.
-          username: engine === 'oracle' ? 'c##cdc' : 'cdc',
-          password: 'cdcpw',
+          ...(cdcSecretArn
+            ? { 'secret-arn': cdcSecretArn }
+            : {
+                username: engine === 'oracle' ? 'c##cdc' : 'cdc',
+                password: 'cdcpw',
+              }),
         }
       : cdcSecretArn
       ? {
@@ -377,7 +384,7 @@ export class ZeroEtlStack extends Stack {
           username: cdcCtx('cdcUsername', 'cdc'),
           password: cdcCtx('cdcPassword', 'REPLACE_WITH_YOUR_DB_PASSWORD'),
         };
-    if (!engine && cdcSecretArn) {
+    if (cdcSecretArn) {
       // grantRead = secretsmanager:GetSecretValue + DescribeSecret, scoped to
       // this one secret. Complete ARNs (with the 6-char random suffix) are
       // matched exactly; a partial ARN gets the -?????? wildcard appended so
