@@ -33,6 +33,8 @@
     <hadoop.version>3.4.3</hadoop.version>
     <mysql.connector.version>9.1.0</mysql.connector.version>
     <kda.runtime.version>1.2.0</kda.runtime.version>
+    <!-- Must match the SDK inside iceberg-aws-bundle ${iceberg.version}. -->
+    <awssdk.version>2.44.4</awssdk.version>
 
     <shade.plugin.version>3.6.0</shade.plugin.version>
     <main.class>com.example.cdc.CdcToIcebergJob</main.class>
@@ -168,6 +170,18 @@
       <groupId>com.amazonaws</groupId>
       <artifactId>aws-kinesisanalytics-runtime</artifactId>
       <version>${kda.runtime.version}</version>
+    </dependency>
+
+    <!-- Secrets Manager client for DbSecrets (cdc.secret-arn). Pinned to the
+         EXACT SDK version already inside iceberg-aws-bundle (check
+         META-INF/maven/software.amazon.awssdk/*/pom.properties when bumping
+         the bundle) so the shade merge of the shared SDK runtime classes is
+         byte-identical. Rides the existing software.amazon.awssdk relocation
+         below, same as the bundle. -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>secretsmanager</artifactId>
+      <version>${awssdk.version}</version>
     </dependency>
   </dependencies>
 

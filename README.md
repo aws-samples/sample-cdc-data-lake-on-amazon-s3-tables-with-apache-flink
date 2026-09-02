@@ -99,8 +99,38 @@ npx cdk deploy -c cdcMode=dynamic -c testSource=mysql
 
 Omit `-c testSource` and pass `-c cdcHostname/-c cdcPort/-c cdcDatabase/...`
 to point at your own database instead. Context flags: `cdcMode`
-(`single|dynamic`), `testSource` (`mysql|postgres|oracle`), `icebergNamespace`,
-`appName`, `tableBucketName`, `formatVersion` (`2|3`, default `2`).
+(`single|dynamic`), `testSource` (`mysql|postgres|oracle`), `cdcSecretArn`,
+`icebergNamespace`, `appName`, `tableBucketName`, `formatVersion` (`2|3`,
+default `2`).
+
+### Database credentials from AWS Secrets Manager
+
+When pointing at your own database, keep the credentials out of the
+CloudFormation template, the Managed Service for Apache Flink console, and
+`DescribeApplication` output by storing them in AWS Secrets Manager and
+passing only the secret's ARN:
+
+```bash
+aws secretsmanager create-secret --name zero-etl/source-db \
+  --secret-string '{"username":"cdc","password":"YOUR_PASSWORD"}'
+
+npx cdk deploy -c cdcHostname=db.internal -c cdcDatabase=inventory \
+  -c cdcTable=orders \
+  -c cdcSecretArn=arn:aws:secretsmanager:REGION:ACCOUNT:secret:zero-etl/source-db-SUFFIX
+```
+
+The CDK grants the application's service execution role
+`secretsmanager:GetSecretValue` on that one secret, and the job resolves it
+once at startup (`app/.../DbSecrets.java`). The secret uses the standard RDS
+key names — `username` and `password` are required; `host`, `port`, and
+`dbname`, when present, override the corresponding context flags. If the
+secret is encrypted with a customer-managed KMS key, also grant the MSF role
+`kms:Decrypt` on that key. A rotated password takes effect on the next
+application restart (the job reads the secret in `main()`).
+
+The `-c cdcUsername/-c cdcPassword` context flags still work as a plaintext
+fallback for throwaway experiments, and the local Docker harness is unaffected
+(no `secret-arn`, no AWS call).
 
 ### Verify
 

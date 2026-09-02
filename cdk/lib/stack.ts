@@ -8,6 +8,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as msf from 'aws-cdk-lib/aws-kinesisanalyticsv2';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 
 /**
  * Real-AWS Tier-B architecture for the blog:
@@ -322,16 +323,28 @@ export class ZeroEtlStack extends Stack {
     // reads these from the "cdc" environment property group. When a test source
     // is provisioned above, wire them to that in-VPC instance and the exact
     // credentials/table its container was seeded with. Otherwise read from CDK
-    // context so you can point the app at your OWN self-managed database:
-    //   cdk synth -c cdcHostname=db.internal -c cdcPort=3306 \
-    //             -c cdcDatabase=inventory   -c cdcTable=orders \
-    //             -c cdcUsername=cdc          -c cdcPassword=...
+    // context so you can point the app at your OWN self-managed database.
+    //
+    // PREFERRED (credentials never enter the template, the MSF console, or
+    // DescribeApplication output — only the secret's ARN does):
+    //   aws secretsmanager create-secret --name zero-etl/source-db \
+    //     --secret-string '{"username":"cdc","password":"..."}'
+    //   cdk deploy -c cdcHostname=db.internal -c cdcPort=3306 \
+    //              -c cdcDatabase=inventory   -c cdcTable=orders \
+    //              -c cdcSecretArn=arn:aws:secretsmanager:...:secret:zero-etl/source-db-AbCdEf
+    // The app resolves the secret at startup (app/.../DbSecrets.java); the
+    // secret may also carry host/port/dbname to override the context values.
+    //
+    // FALLBACK (plaintext in the template and MSF runtime properties — fine
+    // for throwaway experiments, not for anything shared):
+    //   ... -c cdcUsername=cdc -c cdcPassword=...
     // With neither a flag nor context, clearly-named placeholders keep synth
     // deterministic (you must set real values before deploy).
     const cdcCtx = (key: string, fallback: string): string => {
       const v = this.node.tryGetContext(key);
       return typeof v === 'string' && v ? v : fallback;
     };
+    const cdcSecretArn = cdcCtx('cdcSecretArn', '');
     const cdcPropertyMap: Record<string, string> = engine
       ? {
           engine: engine,
@@ -344,6 +357,17 @@ export class ZeroEtlStack extends Stack {
           username: engine === 'oracle' ? 'c##cdc' : 'cdc',
           password: 'cdcpw',
         }
+      : cdcSecretArn
+      ? {
+          engine: cdcCtx('cdcEngine', 'mysql'),
+          hostname: cdcCtx('cdcHostname', 'REPLACE_WITH_YOUR_DB_HOSTNAME'),
+          port: cdcCtx('cdcPort', '3306'),
+          'database-name': cdcCtx('cdcDatabase', 'inventory'),
+          'table-name': cdcCtx('cdcTable', 'orders'),
+          // No username/password keys at all: the app fetches them from this
+          // secret at startup with the service execution role (grant below).
+          'secret-arn': cdcSecretArn,
+        }
       : {
           engine: cdcCtx('cdcEngine', 'mysql'),
           hostname: cdcCtx('cdcHostname', 'REPLACE_WITH_YOUR_DB_HOSTNAME'),
@@ -353,6 +377,19 @@ export class ZeroEtlStack extends Stack {
           username: cdcCtx('cdcUsername', 'cdc'),
           password: cdcCtx('cdcPassword', 'REPLACE_WITH_YOUR_DB_PASSWORD'),
         };
+    if (!engine && cdcSecretArn) {
+      // grantRead = secretsmanager:GetSecretValue + DescribeSecret, scoped to
+      // this one secret. Complete ARNs (with the 6-char random suffix) are
+      // matched exactly; a partial ARN gets the -?????? wildcard appended so
+      // the policy still matches the real suffix. If the secret is encrypted
+      // with a customer-managed KMS key, additionally grant the MSF role
+      // kms:Decrypt on that key (the default aws/secretsmanager key needs no
+      // extra statement).
+      const dbSecret = /-[A-Za-z0-9]{6}$/.test(cdcSecretArn)
+        ? secretsmanager.Secret.fromSecretCompleteArn(this, 'CdcDbSecret', cdcSecretArn)
+        : secretsmanager.Secret.fromSecretPartialArn(this, 'CdcDbSecret', cdcSecretArn);
+      dbSecret.grantRead(role);
+    }
     // Sync mode: 'single' (Table API, one table — the post's main path) or
     // 'dynamic' (DataStream + DynamicIcebergSink, whole schema with
     // create-tables-on-the-fly). Selectable per deploy: -c cdcMode=dynamic
