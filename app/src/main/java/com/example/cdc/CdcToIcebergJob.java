@@ -26,7 +26,9 @@ import java.util.regex.Pattern;
  *   group "iceberg" : catalog.uri, catalog.warehouse, catalog.rest.sigv4-enabled,
  *                     catalog.rest.signing-name, catalog.namespace,
  *                     catalog.format-version
- *   group "cdc"     : hostname, port, database-name, table-name, username, password
+ *   group "cdc"     : hostname, port, database-name, table-name, and either
+ *                     username + password inline OR secret-arn naming an AWS
+ *                     Secrets Manager secret that carries them (see DbSecrets)
  *
  * Every property is required. A missing key fails fast at startup with a
  * message naming the exact group + key, so a misconfigured MSF app surfaces the
@@ -48,7 +50,12 @@ public final class CdcToIcebergJob {
                 KinesisAnalyticsRuntime.getApplicationProperties();
 
         final Properties iceberg = requireGroup(appProps, ICEBERG_GROUP);
-        final Properties cdc = requireGroup(appProps, CDC_GROUP);
+        // Resolve DB credentials BEFORE the mode dispatch so every mode
+        // (single, dynamic, dynamic-legacy, pg-probe) sees the same resolved
+        // group. With a "secret-arn" key the username/password come from AWS
+        // Secrets Manager (see DbSecrets); without it the plain properties are
+        // used unchanged (the local Docker harness path).
+        final Properties cdc = DbSecrets.resolve(requireGroup(appProps, CDC_GROUP));
 
         // --- mode switch -----------------------------------------------------
         // cdc group, key "mode": "single" (default) keeps the single-table
