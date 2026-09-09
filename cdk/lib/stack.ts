@@ -439,6 +439,19 @@ export class ZeroEtlStack extends Stack {
             checkpointInterval: 10000,
             minPauseBetweenCheckpoints: 5000,
           },
+          // OPERATOR-level metrics forward the CDC source's connector-registered
+          // metrics (currentFetchEventTimeLag, currentEmitEventTimeLag,
+          // sourceIdleTime) and per-operator numRecordsOutPerSecond to
+          // CloudWatch -- the signals the monitoring dashboard below reads.
+          // APPLICATION (the service default) only ships app-level aggregates,
+          // which cannot distinguish real CDC flow from binlog heartbeat noise.
+          // Trade-off: metric count (and CloudWatch cost) scales with
+          // operator count x parallelism; override with -c metricsLevel=...
+          monitoringConfiguration: {
+            configurationType: 'CUSTOM',
+            logLevel: 'INFO',
+            metricsLevel: cdcCtx('metricsLevel', 'OPERATOR'),
+          },
           parallelismConfiguration: {
             configurationType: 'CUSTOM',
             parallelism: 2,
