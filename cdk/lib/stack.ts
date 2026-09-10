@@ -598,6 +598,48 @@ export class ZeroEtlStack extends Stack {
         + `#dashboards:name=${dashboard.dashboardName}`,
     });
 
+    // --- Alarms: the difference between a dashboard and monitoring ----------
+    // No alarm actions are wired (sample keeps SNS out of scope): attach your
+    // topic via alarm.addAlarmAction(new cw_actions.SnsAction(topic)).
+    new cloudwatch.Alarm(this, 'JobRestartsAlarm', {
+      alarmName: `${appName}-job-restarts`,
+      metric: appMetric('numRestarts', 'Maximum'),
+      threshold: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      evaluationPeriods: 1,
+      alarmDescription: 'Flink job restarted: check /jobs/<id>/exceptions via the presigned Flink dashboard URL.',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    new cloudwatch.Alarm(this, 'CheckpointDurationAlarm', {
+      alarmName: `${appName}-checkpoint-duration`,
+      metric: appMetric('lastCheckpointDuration', 'Maximum'),
+      threshold: 30_000,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 3,
+      alarmDescription: 'Checkpoints taking >30s sustained: state growth or backpressure; check writer busyTime and source lag.',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    new cloudwatch.Alarm(this, 'EventTimeLagAlarm', {
+      alarmName: `${appName}-event-time-lag`,
+      // Custom gauge published by PerTableMetrics (dynamic mode): event-time
+      // distance between the database commit and the record passing the
+      // metrics stage. The connector's own fetch-lag metric never reaches
+      // CloudWatch, so this gauge is the alarmable "keeping up" signal.
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/KinesisAnalytics',
+        metricName: 'eventTimeLagMs',
+        dimensionsMap: { Application: appName },
+        statistic: 'Maximum',
+        period: Duration.minutes(1),
+      }),
+      threshold: 60_000,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 5,
+      alarmDescription: 'CDC pipeline more than 60s behind the database for 5 minutes: job is not keeping up with change volume.',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     new CfnOutput(this, 'TableBucketArn', { value: tableBucketArn });
     new CfnOutput(this, 'AppJarS3Uri', { value: appJar.s3ObjectUrl });
     new CfnOutput(this, 'MsfApplicationName', { value: app.applicationName! });

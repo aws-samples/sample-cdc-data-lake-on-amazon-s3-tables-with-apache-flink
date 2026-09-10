@@ -33,8 +33,15 @@ final class PerTableMetrics extends RichMapFunction<String, String> {
     // inside the source block. Envelope shape is stable Debezium JSON.
     private static final Pattern TABLE = Pattern.compile(
             "\"source\"\\s*:\\s*\\{[^}]*?\"table\"\\s*:\\s*\"([^\"]+)\"");
+    // source.ts_ms = commit time at the database (event time). The top-level
+    // ts_ms is connector processing time -- not what lag should measure.
+    private static final Pattern SOURCE_TS = Pattern.compile(
+            "\"source\"\\s*:\\s*\\{[^}]*?\"ts_ms\"\\s*:\\s*(\\d+)");
+    private static final Pattern OP = Pattern.compile("\"op\"\\s*:\\s*\"([cudr])\"");
 
     private transient Map<String, Counter> counters;
+    private transient Map<String, Counter> opCounters;
+    private volatile long eventTimeLagMs;
 
     @Override
     public String map(String envelope) {
@@ -42,6 +49,40 @@ final class PerTableMetrics extends RichMapFunction<String, String> {
             // Lazy init instead of open(): Flink 2.x replaced the
             // open(Configuration) signature with open(OpenContext).
             counters = new HashMap<>();
+            opCounters = new HashMap<>();
+            // Event-time lag of the last record seen: now - source commit
+            // time. THE production "is the job keeping up" signal, since the
+            // connector's own currentFetchEventTimeLag never reaches
+            // CloudWatch (verified: Flink-REST-only on MSF).
+            getRuntimeContext().getMetricGroup()
+                    .addGroup("kinesisanalytics")
+                    .gauge("eventTimeLagMs", () -> eventTimeLagMs);
+        }
+        final Matcher ts = SOURCE_TS.matcher(envelope);
+        if (ts.find()) {
+            final long srcTs = Long.parseLong(ts.group(1));
+            // Snapshot-phase records can carry source.ts_ms = 0; skipping them
+            // keeps the gauge from spiking to epoch-now (observed under load).
+            if (srcTs > 0) {
+                eventTimeLagMs = Math.max(0L, System.currentTimeMillis() - srcTs);
+            }
+        }
+        // Job-wide operation mix (c/u/d, r = snapshot read): deliberately NOT
+        // per-table to keep CloudWatch cardinality flat as table count grows.
+        final Matcher op = OP.matcher(envelope);
+        if (op.find()) {
+            final String name;
+            switch (op.group(1)) {
+                case "c": name = "insertsProcessed"; break;
+                case "u": name = "updatesProcessed"; break;
+                case "d": name = "deletesProcessed"; break;
+                default:  name = "snapshotRowsProcessed"; break;
+            }
+            opCounters.computeIfAbsent(name, n ->
+                    getRuntimeContext().getMetricGroup()
+                            .addGroup("kinesisanalytics")
+                            .counter(n))
+                    .inc();
         }
         final Matcher m = TABLE.matcher(envelope);
         if (m.find()) {
