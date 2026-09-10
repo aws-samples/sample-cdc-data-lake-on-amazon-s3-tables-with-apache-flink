@@ -9,6 +9,7 @@ import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as msf from 'aws-cdk-lib/aws-kinesisanalyticsv2';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 
 /**
  * Real-AWS Tier-B architecture for the blog:
@@ -505,6 +506,97 @@ export class ZeroEtlStack extends Stack {
     // add it explicitly, or the logging option races ahead of the app and fails
     // with "Application ... does not exist".
     msfLogging.node.addDependency(app);
+
+    // --- CloudWatch monitoring dashboard -------------------------------------
+    // Built from the metric names and dimension sets MSF ACTUALLY publishes
+    // (verified against a live deploy with OPERATOR metrics level). Notes:
+    //  * Connector-registered FLIP-33 metrics (currentFetchEventTimeLag,
+    //    sourceIdleTime) do NOT forward to CloudWatch at any metrics level --
+    //    they are visible only through the Flink REST API (presigned URL).
+    //    CDC flow is therefore monitored via the per_table_metrics operator's
+    //    numRecordsOutPerSecond (post-source, heartbeat-free) and the custom
+    //    per-table counters.
+    //  * SinkV2 committer metrics DO forward at OPERATOR level;
+    //    failedCommittables > 0 means Iceberg commits are failing.
+    const appName = app.applicationName!;
+    const appMetric = (metricName: string, stat = 'Sum'):
+      cloudwatch.IMetric => new cloudwatch.Metric({
+        namespace: 'AWS/KinesisAnalytics',
+        metricName,
+        // Dimension names as observed: Application / Task / TaskOperator.
+        // TaskOperator alone is not queryable; CloudWatch needs the full set,
+        // so use search expressions scoped to operator name instead.
+        dimensionsMap: { Application: appName },
+        statistic: stat,
+        period: Duration.minutes(1),
+      });
+    const opSearch = (metricName: string, taskOperator: string, label: string):
+      cloudwatch.IMetric => new cloudwatch.MathExpression({
+        expression: `SEARCH('{AWS/KinesisAnalytics,Application,Task,TaskOperator} `
+          + `MetricName="${metricName}" Application="${appName}" `
+          + `TaskOperator="${taskOperator}"', 'Sum', 60)`,
+        usingMetrics: {},
+        label,
+        period: Duration.minutes(1),
+      });
+    const dashboard = new cloudwatch.Dashboard(this, 'MonitoringDashboard', {
+      dashboardName: `${appName}-cdc-monitoring`,
+      widgets: [
+        [
+          new cloudwatch.GraphWidget({
+            title: 'CDC flow (records/s past the source, heartbeat-free)',
+            left: [opSearch('numRecordsOutPerSecond', 'per_table_metrics', 'records/s')],
+            width: 12,
+          }),
+          new cloudwatch.GraphWidget({
+            title: 'Per-table records processed (custom metrics)',
+            left: [new cloudwatch.MathExpression({
+              expression: `SEARCH('{AWS/KinesisAnalytics,Application,Task,TaskOperator,cdcTable} `
+                + `MetricName="recordsProcessed" Application="${appName}"', 'Sum', 60)`,
+              usingMetrics: {},
+              label: '',
+              period: Duration.minutes(1),
+            })],
+            width: 12,
+          }),
+        ],
+        [
+          new cloudwatch.GraphWidget({
+            title: 'Iceberg commits (SinkV2 committer)',
+            left: [
+              opSearch('successfulCommittables', 'Sink:_Committer', 'successful'),
+              opSearch('failedCommittables', 'Sink:_Committer', 'FAILED'),
+              opSearch('pendingCommittables', 'Sink:_Committer', 'pending'),
+            ],
+            width: 12,
+          }),
+          new cloudwatch.GraphWidget({
+            title: 'Job health',
+            left: [
+              appMetric('numRestarts', 'Maximum'),
+              appMetric('numberOfFailedCheckpoints', 'Maximum'),
+            ],
+            right: [appMetric('lastCheckpointDuration', 'Maximum')],
+            width: 12,
+          }),
+        ],
+        [
+          new cloudwatch.GraphWidget({
+            title: 'Resources',
+            left: [
+              appMetric('containerCPUUtilization', 'Average'),
+              appMetric('heapMemoryUtilization', 'Average'),
+            ],
+            right: [appMetric('KPUs', 'Maximum')],
+            width: 24,
+          }),
+        ],
+      ],
+    });
+    new CfnOutput(this, 'DashboardUrl', {
+      value: `https://${this.region}.console.aws.amazon.com/cloudwatch/home?region=${this.region}`
+        + `#dashboards:name=${dashboard.dashboardName}`,
+    });
 
     new CfnOutput(this, 'TableBucketArn', { value: tableBucketArn });
     new CfnOutput(this, 'AppJarS3Uri', { value: appJar.s3ObjectUrl });

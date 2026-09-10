@@ -47,6 +47,13 @@ final class PerTableMetrics extends RichMapFunction<String, String> {
         if (m.find()) {
             counters.computeIfAbsent(m.group(1), t ->
                     getRuntimeContext().getMetricGroup()
+                            // MSF publishes user metrics to CloudWatch ONLY
+                            // when they are registered under a group named
+                            // "kinesisanalytics" (verified empirically: without
+                            // it the metric exists in the Flink REST API but
+                            // never reaches CloudWatch). Nested key/value
+                            // groups become CloudWatch dimensions.
+                            .addGroup("kinesisanalytics")
                             .addGroup("cdcTable", t)
                             .counter("recordsProcessed"))
                     .inc();
