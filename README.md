@@ -47,6 +47,23 @@ Oracle bundles the `ojdbc11` driver in the application JAR (the managed
 service has no `/opt/flink/lib`) and mirrors the LogMiner configuration in
 `sql/oracle-setup.sql`.
 
+### PostgreSQL replication-slot retention
+
+The job owns a replication slot, and PostgreSQL retains WAL from the slot's
+`restart_lsn` until the connector acknowledges it. The slot advances only
+when a record from a captured table is emitted and a checkpoint completes:
+the checkpoint interval directly bounds how much WAL the source retains, and
+a job whose captured tables are idle while the server writes WAL elsewhere
+pins WAL without bound. Debezium's `heartbeat.interval.ms` and
+`heartbeat.action.query` do not close this gap through Flink CDC. What
+works: a small heartbeat table inside the captured table set, updated on a
+schedule from the database side (pg_cron or an external scheduler). Dynamic
+mode captures it automatically; in single (Table API) mode each source table
+runs its own connector with its own slot, so apply the pattern per
+connector. Monitor `pg_replication_slots` / `pg_wal_lsn_diff` on the source
+and alarm on growth; a stopped job pins WAL until it resumes or its slot is
+dropped.
+
 For the full range of versions each Flink CDC 3.6 connector supports, see the
 [Flink CDC documentation](https://nightlies.apache.org/flink/flink-cdc-docs-release-3.6/).
 Version context:
