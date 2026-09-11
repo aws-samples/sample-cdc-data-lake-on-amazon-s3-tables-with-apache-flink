@@ -9,6 +9,7 @@ import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as msf from 'aws-cdk-lib/aws-kinesisanalyticsv2';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 
 /**
  * Real-AWS Tier-B architecture for the blog:
@@ -439,6 +440,19 @@ export class ZeroEtlStack extends Stack {
             checkpointInterval: 10000,
             minPauseBetweenCheckpoints: 5000,
           },
+          // OPERATOR-level metrics forward the CDC source's connector-registered
+          // metrics (currentFetchEventTimeLag, currentEmitEventTimeLag,
+          // sourceIdleTime) and per-operator numRecordsOutPerSecond to
+          // CloudWatch -- the signals the monitoring dashboard below reads.
+          // APPLICATION (the service default) only ships app-level aggregates,
+          // which cannot distinguish real CDC flow from binlog heartbeat noise.
+          // Trade-off: metric count (and CloudWatch cost) scales with
+          // operator count x parallelism; override with -c metricsLevel=...
+          monitoringConfiguration: {
+            configurationType: 'CUSTOM',
+            logLevel: 'INFO',
+            metricsLevel: cdcCtx('metricsLevel', 'OPERATOR'),
+          },
           parallelismConfiguration: {
             configurationType: 'CUSTOM',
             parallelism: 2,
@@ -492,6 +506,139 @@ export class ZeroEtlStack extends Stack {
     // add it explicitly, or the logging option races ahead of the app and fails
     // with "Application ... does not exist".
     msfLogging.node.addDependency(app);
+
+    // --- CloudWatch monitoring dashboard -------------------------------------
+    // Built from the metric names and dimension sets MSF ACTUALLY publishes
+    // (verified against a live deploy with OPERATOR metrics level). Notes:
+    //  * Connector-registered FLIP-33 metrics (currentFetchEventTimeLag,
+    //    sourceIdleTime) do NOT forward to CloudWatch at any metrics level --
+    //    they are visible only through the Flink REST API (presigned URL).
+    //    CDC flow is therefore monitored via the per_table_metrics operator's
+    //    numRecordsOutPerSecond (post-source, heartbeat-free) and the custom
+    //    per-table counters.
+    //  * SinkV2 committer metrics DO forward at OPERATOR level;
+    //    failedCommittables > 0 means Iceberg commits are failing.
+    const appName = app.applicationName!;
+    const appMetric = (metricName: string, stat = 'Sum'):
+      cloudwatch.IMetric => new cloudwatch.Metric({
+        namespace: 'AWS/KinesisAnalytics',
+        metricName,
+        // Dimension names as observed: Application / Task / TaskOperator.
+        // TaskOperator alone is not queryable; CloudWatch needs the full set,
+        // so use search expressions scoped to operator name instead.
+        dimensionsMap: { Application: appName },
+        statistic: stat,
+        period: Duration.minutes(1),
+      });
+    const opSearch = (metricName: string, taskOperator: string, label: string):
+      cloudwatch.IMetric => new cloudwatch.MathExpression({
+        expression: `SEARCH('{AWS/KinesisAnalytics,Application,Task,TaskOperator} `
+          + `MetricName="${metricName}" Application="${appName}" `
+          + `TaskOperator="${taskOperator}"', 'Sum', 60)`,
+        usingMetrics: {},
+        label,
+        period: Duration.minutes(1),
+      });
+    const dashboard = new cloudwatch.Dashboard(this, 'MonitoringDashboard', {
+      dashboardName: `${appName}-cdc-monitoring`,
+      widgets: [
+        [
+          new cloudwatch.GraphWidget({
+            title: 'CDC flow (records/s past the source, heartbeat-free)',
+            left: [opSearch('numRecordsOutPerSecond', 'per_table_metrics', 'records/s')],
+            width: 12,
+          }),
+          new cloudwatch.GraphWidget({
+            title: 'Per-table records processed (custom metrics)',
+            left: [new cloudwatch.MathExpression({
+              expression: `SEARCH('{AWS/KinesisAnalytics,Application,Task,TaskOperator,cdcTable} `
+                + `MetricName="recordsProcessed" Application="${appName}"', 'Sum', 60)`,
+              usingMetrics: {},
+              label: '',
+              period: Duration.minutes(1),
+            })],
+            width: 12,
+          }),
+        ],
+        [
+          new cloudwatch.GraphWidget({
+            title: 'Iceberg commits (SinkV2 committer)',
+            left: [
+              opSearch('successfulCommittables', 'Sink:_Committer', 'successful'),
+              opSearch('failedCommittables', 'Sink:_Committer', 'FAILED'),
+              opSearch('pendingCommittables', 'Sink:_Committer', 'pending'),
+            ],
+            width: 12,
+          }),
+          new cloudwatch.GraphWidget({
+            title: 'Job health',
+            left: [
+              appMetric('numRestarts', 'Maximum'),
+              appMetric('numberOfFailedCheckpoints', 'Maximum'),
+            ],
+            right: [appMetric('lastCheckpointDuration', 'Maximum')],
+            width: 12,
+          }),
+        ],
+        [
+          new cloudwatch.GraphWidget({
+            title: 'Resources',
+            left: [
+              appMetric('containerCPUUtilization', 'Average'),
+              appMetric('heapMemoryUtilization', 'Average'),
+            ],
+            right: [appMetric('KPUs', 'Maximum')],
+            width: 24,
+          }),
+        ],
+      ],
+    });
+    new CfnOutput(this, 'DashboardUrl', {
+      value: `https://${this.region}.console.aws.amazon.com/cloudwatch/home?region=${this.region}`
+        + `#dashboards:name=${dashboard.dashboardName}`,
+    });
+
+    // --- Alarms: the difference between a dashboard and monitoring ----------
+    // No alarm actions are wired (sample keeps SNS out of scope): attach your
+    // topic via alarm.addAlarmAction(new cw_actions.SnsAction(topic)).
+    new cloudwatch.Alarm(this, 'JobRestartsAlarm', {
+      alarmName: `${appName}-job-restarts`,
+      metric: appMetric('numRestarts', 'Maximum'),
+      threshold: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      evaluationPeriods: 1,
+      alarmDescription: 'Flink job restarted: check /jobs/<id>/exceptions via the presigned Flink dashboard URL.',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    new cloudwatch.Alarm(this, 'CheckpointDurationAlarm', {
+      alarmName: `${appName}-checkpoint-duration`,
+      metric: appMetric('lastCheckpointDuration', 'Maximum'),
+      threshold: 30_000,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 3,
+      alarmDescription: 'Checkpoints taking >30s sustained: state growth or backpressure; check writer busyTime and source lag.',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    new cloudwatch.Alarm(this, 'EventTimeLagAlarm', {
+      alarmName: `${appName}-event-time-lag`,
+      // Custom gauge published by PerTableMetrics (dynamic mode): event-time
+      // distance between the database commit and the record passing the
+      // metrics stage. The connector's own fetch-lag metric never reaches
+      // CloudWatch, so this gauge is the alarmable "keeping up" signal.
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/KinesisAnalytics',
+        metricName: 'eventTimeLagMs',
+        dimensionsMap: { Application: appName },
+        statistic: 'Maximum',
+        period: Duration.minutes(1),
+      }),
+      threshold: 60_000,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 5,
+      alarmDescription: 'CDC pipeline more than 60s behind the database for 5 minutes: job is not keeping up with change volume.',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     new CfnOutput(this, 'TableBucketArn', { value: tableBucketArn });
     new CfnOutput(this, 'AppJarS3Uri', { value: appJar.s3ObjectUrl });

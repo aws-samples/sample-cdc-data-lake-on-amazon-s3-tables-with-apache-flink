@@ -149,7 +149,13 @@ public final class DynamicCdcToIcebergJob {
         final DataStream<String> changes = env
                 .fromSource(source, WatermarkStrategy.noWatermarks(),
                         "MySQL CDC (whole schema: " + databaseName + ".*)")
-                .uid("mysql-cdc-source-dynamic");
+                .uid("mysql-cdc-source-dynamic")
+                // Per-table custom metrics (cdcTable.<name>.recordsProcessed):
+                // published to CloudWatch by MSF via the Flink metric system.
+                // Pass-through; see PerTableMetrics for the cardinality note.
+                .map(new PerTableMetrics())
+                .name("per-table-metrics")
+                .uid("per-table-metrics");
 
         final CatalogLoader catalogLoader = restCatalogLoader(iceberg, region);
 
