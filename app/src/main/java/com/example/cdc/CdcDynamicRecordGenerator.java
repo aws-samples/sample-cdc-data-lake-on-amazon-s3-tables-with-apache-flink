@@ -3,6 +3,7 @@ package com.example.cdc;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.cdc.connectors.shaded.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.cdc.connectors.shaded.com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.flink.cdc.connectors.shaded.com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
@@ -22,7 +23,11 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
@@ -122,6 +127,13 @@ public final class CdcDynamicRecordGenerator implements DynamicRecordGenerator<S
         }
 
         final TableIdentifier tableId = TableIdentifier.of(namespace, table);
+        // Rewrite Debezium's numeric temporal encodings to ISO strings BEFORE
+        // inference, using the semantic-type hints the deserializer read from
+        // the Connect schema. Without this, DATETIME lands as epoch millis,
+        // DATE as epoch days, and TIME as micros-of-day -- raw longs.
+        if (payload instanceof ObjectNode) {
+            rewriteSemanticTypes((ObjectNode) payload, wrapper.get("__t"));
+        }
         final String signature = schemaSignature(table, payload);
         final Schema schema = schemaCache.computeIfAbsent(signature, sig -> inferSchema(payload));
 
@@ -158,6 +170,56 @@ public final class CdcDynamicRecordGenerator implements DynamicRecordGenerator<S
             }
         }
         return pk;
+    }
+
+    /**
+     * Convert Debezium's numeric temporal encodings to ISO-8601 strings, per
+     * the {@code __t} hints from {@link CdcJsonDeserializer}. DATETIME becomes
+     * a local ISO datetime (no zone -- MySQL DATETIME carries none, and the
+     * epoch number Debezium ships is the wall-clock reading decoded at UTC),
+     * DATE an ISO date, TIME an ISO time-of-day string. Inference below then
+     * lands them as Iceberg timestamp / date / string instead of raw longs.
+     */
+    private void rewriteSemanticTypes(ObjectNode payload, JsonNode hints) {
+        if (hints == null || !hints.isObject()) {
+            return;
+        }
+        final Iterator<String> names = hints.fieldNames();
+        while (names.hasNext()) {
+            final String field = names.next();
+            final JsonNode v = payload.get(field);
+            if (v == null || !v.isNumber()) {
+                continue;
+            }
+            final long n = v.asLong();
+            final String iso;
+            switch (hints.get(field).asText()) {
+                case "date-days":
+                    iso = LocalDate.ofEpochDay(n).toString();
+                    break;
+                case "ts-ms":
+                    iso = LocalDateTime.ofInstant(Instant.ofEpochMilli(n), ZoneOffset.UTC).toString();
+                    break;
+                case "ts-us":
+                    iso = LocalDateTime.ofInstant(Instant.EPOCH.plus(n, ChronoUnit.MICROS), ZoneOffset.UTC).toString();
+                    break;
+                case "ts-ns":
+                    iso = LocalDateTime.ofInstant(Instant.EPOCH.plusNanos(n), ZoneOffset.UTC).toString();
+                    break;
+                case "time-ms":
+                    iso = LocalTime.ofNanoOfDay(n * 1_000_000L).toString();
+                    break;
+                case "time-us":
+                    iso = LocalTime.ofNanoOfDay(n * 1_000L).toString();
+                    break;
+                case "time-ns":
+                    iso = LocalTime.ofNanoOfDay(n).toString();
+                    break;
+                default:
+                    continue;
+            }
+            payload.put(field, iso);
+        }
     }
 
     // ---- schema inference (copied from the reference, scalar subset) --------
@@ -220,6 +282,9 @@ public final class CdcDynamicRecordGenerator implements DynamicRecordGenerator<S
             if (isTimestamp(t)) {
                 return Types.TimestampType.withZone();
             }
+            if (isLocalDateTime(t)) {
+                return Types.TimestampType.withoutZone();
+            }
             if (isDate(t)) {
                 return Types.DateType.get();
             }
@@ -269,7 +334,13 @@ public final class CdcDynamicRecordGenerator implements DynamicRecordGenerator<S
         }
         if (type instanceof Types.TimestampType) {
             if (v.isTextual()) {
-                return TimestampData.fromInstant(Instant.parse(v.asText()));
+                final String t = v.asText();
+                try {
+                    return TimestampData.fromInstant(Instant.parse(t));
+                } catch (DateTimeParseException e) {
+                    // Local ISO datetime (no offset) -- the without-zone case.
+                    return TimestampData.fromLocalDateTime(LocalDateTime.parse(t));
+                }
             }
             if (v.isNumber()) {
                 return TimestampData.fromEpochMillis(v.asLong());
@@ -300,6 +371,19 @@ public final class CdcDynamicRecordGenerator implements DynamicRecordGenerator<S
         }
         try {
             Instant.parse(text);
+            return true;
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+    }
+
+    /** Local ISO datetime without an offset, e.g. {@code 2026-09-11T11:00:00.456}. */
+    private boolean isLocalDateTime(String text) {
+        if (text == null || text.length() < 16 || !text.contains("T")) {
+            return false;
+        }
+        try {
+            LocalDateTime.parse(text);
             return true;
         } catch (DateTimeParseException e) {
             return false;

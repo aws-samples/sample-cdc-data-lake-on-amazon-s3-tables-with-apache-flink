@@ -24,7 +24,15 @@ import java.util.List;
  * Debezium populates with exactly the table's primary-key columns) and wrap
  * both together:
  *
- * <pre>{@code  {"__pk":["order_id"],"e":<debezium-envelope-json>} }</pre>
+ * <pre>{@code  {"__pk":["order_id"],"__t":{"dt":"ts-ms"},"e":<debezium-envelope-json>} }</pre>
+ *
+ * <p>{@code __t} maps column names to Debezium <b>semantic types</b> read from
+ * the Kafka Connect value schema. The envelope alone encodes temporal columns
+ * as bare numbers (DATETIME as epoch millis/micros, DATE as epoch days, TIME
+ * as micros-of-day), indistinguishable from genuine integer columns once the
+ * schema is gone. The generator uses these hints to land them as readable
+ * temporal values instead of raw numbers (verified empirically: without the
+ * hints a DATETIME(3) lands in Iceberg as {@code long 1789124400456}).
  *
  * Emitting a {@code String} keeps the stream element trivially serializable by
  * Flink (no custom TypeInformation, mirroring the reference sample's use of a
@@ -37,6 +45,23 @@ public final class CdcJsonDeserializer implements DebeziumDeserializationSchema<
     // Reused for the value envelope. transient + lazy init: the stock schema is
     // not guaranteed serializable and there is no open() hook on this interface.
     private transient JsonDebeziumDeserializationSchema envelopeSchema;
+
+    /** Debezium semantic schema name -> compact hint the generator understands. */
+    private static String semanticHint(String schemaName) {
+        if (schemaName == null) {
+            return null;
+        }
+        switch (schemaName) {
+            case "io.debezium.time.Date":           return "date-days";
+            case "io.debezium.time.Timestamp":      return "ts-ms";
+            case "io.debezium.time.MicroTimestamp": return "ts-us";
+            case "io.debezium.time.NanoTimestamp":  return "ts-ns";
+            case "io.debezium.time.Time":           return "time-ms";
+            case "io.debezium.time.MicroTime":      return "time-us";
+            case "io.debezium.time.NanoTime":       return "time-ns";
+            default:                                 return null;
+        }
+    }
 
     @Override
     public void deserialize(SourceRecord record, Collector<String> out) throws Exception {
@@ -75,7 +100,26 @@ public final class CdcJsonDeserializer implements DebeziumDeserializationSchema<
             }
         }
 
-        out.collect("{\"__pk\":[" + pk + "],\"e\":" + envelopeJson + "}");
+        // Semantic-type hints from the Kafka Connect VALUE schema ("after" and
+        // "before" share the table's field schemas; either carries the names).
+        final StringBuilder hints = new StringBuilder();
+        final Schema valueSchema = record.valueSchema();
+        if (valueSchema != null && valueSchema.field("after") != null) {
+            final Schema rowSchema = valueSchema.field("after").schema();
+            if (rowSchema != null && rowSchema.fields() != null) {
+                for (Field f : rowSchema.fields()) {
+                    final String hint = semanticHint(f.schema().name());
+                    if (hint != null) {
+                        if (hints.length() > 0) {
+                            hints.append(',');
+                        }
+                        hints.append('"').append(f.name()).append("\":\"").append(hint).append('"');
+                    }
+                }
+            }
+        }
+
+        out.collect("{\"__pk\":[" + pk + "],\"__t\":{" + hints + "},\"e\":" + envelopeJson + "}");
     }
 
     @Override

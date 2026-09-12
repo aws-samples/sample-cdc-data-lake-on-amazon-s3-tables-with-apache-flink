@@ -120,6 +120,14 @@ public final class DynamicCdcToIcebergJob {
         final Properties dbz = new Properties();
         dbz.setProperty("decimal.handling.mode",
                 cdc.getProperty("debezium.decimal.handling.mode", "double"));
+        // MySQL BIGINT UNSIGNED ships as Kafka Connect Decimal (base64 bytes)
+        // in Debezium's default "precise" mode -- unreadable after JSON
+        // inference, same problem class as decimals above. "long" emits plain
+        // numbers; values above 2^63-1 would overflow, so override via
+        // cdc.debezium.bigint.unsigned.handling.mode=precise for tables that
+        // actually use the top bit (then decode the base64 downstream).
+        dbz.setProperty("bigint.unsigned.handling.mode",
+                cdc.getProperty("debezium.bigint.unsigned.handling.mode", "long"));
 
         final MySqlSource<String> source = MySqlSource.<String>builder()
                 .hostname(hostname)
