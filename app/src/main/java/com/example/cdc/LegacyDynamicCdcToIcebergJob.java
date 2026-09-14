@@ -113,6 +113,10 @@ public final class LegacyDynamicCdcToIcebergJob {
         // Same default + override key as the incremental dynamic path.
         dbz.setProperty("decimal.handling.mode",
                 cdc.getProperty("debezium.decimal.handling.mode", "double"));
+        // Same rationale as DynamicCdcToIcebergJob: BIGINT UNSIGNED lands as
+        // base64 bytes in "precise" mode; "long" keeps it a readable number.
+        dbz.setProperty("bigint.unsigned.handling.mode",
+                cdc.getProperty("debezium.bigint.unsigned.handling.mode", "long"));
 
         // Legacy Debezium SourceFunction source. tableList is the Debezium
         // table.include.list regex; "<db>.*" captures every current AND future

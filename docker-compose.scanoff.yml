@@ -76,6 +76,20 @@ services:
       AWS_REGION: eu-central-1
     ports: ["8195:8181"]
 
+  # Same namespace bootstrap as docker-compose.dynamic.yml: the job creates
+  # tables, not namespaces; the REST fixture starts empty.
+  rest-init:
+    image: curlimages/curl:8.7.1
+    container_name: cdcoff-rest-init
+    depends_on:
+      iceberg-rest: {condition: service_started}
+    entrypoint: >
+      sh -c "until curl -s -o /dev/null -w '%{http_code}' -X POST
+      -H 'Content-Type: application/json'
+      -d '{\"namespace\":[\"lakehouse\"]}'
+      http://iceberg-rest:8181/v1/namespaces | grep -qE '200|409';
+      do sleep 2; done; echo namespace ready"
+
   jobmanager:
     image: flink:2.3.0-java17
     container_name: cdcoff-jobmanager
@@ -83,6 +97,7 @@ services:
     depends_on:
       mysql: {condition: service_healthy}
       iceberg-rest: {condition: service_started}
+      rest-init: {condition: service_completed_successfully}
     ports: ["8093:8081"]
     environment:
       - AWS_REGION=eu-central-1
