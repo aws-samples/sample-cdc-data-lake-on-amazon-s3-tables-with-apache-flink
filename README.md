@@ -33,9 +33,10 @@ One application, three engines. Select with `-c testSource=mysql|postgres|oracle
 catalog wiring are identical across engines; only the CDC source configuration
 changes (`cdc.engine` runtime property, wired automatically by the CDK test
 source). Mode support differs by engine: dynamic mode (whole-database sync,
-live new-table pickup, in-place schema evolution) is MySQL only; PostgreSQL
-and Oracle run single-table (Table API) mode, one declared table per
-`addInsertSql` statement.
+live new-table pickup, in-place schema evolution) supports MySQL and
+PostgreSQL (`cdc.engine=postgres` routes the same pipeline through the
+PostgreSQL incremental source); Oracle runs single-table (Table API) mode,
+one declared table per `addInsertSql` statement.
 
 | Engine | Version | Prerequisites on the source |
 |---|---|---|
@@ -96,6 +97,33 @@ runs its own connector with its own slot, so apply the pattern per
 connector. Monitor `pg_replication_slots` / `pg_wal_lsn_diff` on the source
 and alarm on growth; a stopped job pins WAL until it resumes or its slot is
 dropped.
+
+### PostgreSQL dynamic mode
+
+`mode=dynamic` with `cdc.engine=postgres` runs the same whole-schema
+pipeline as MySQL, with the PostgreSQL incremental source in front: every
+table in `cdc.schema-name` (default `public`) syncs into Iceberg, tables
+created after the job starts are picked up live from the WAL (the
+connector's Debezium creates a `FOR ALL TABLES` publication, so a
+schema-regex table list matches newborn tables with no restart), schemas
+evolve in place, and deletes work against tables with the default
+`REPLICA IDENTITY` (delete events carry the primary key, which is all the
+per-record equality delete needs).
+
+Two PostgreSQL-specific properties:
+
+- `cdc.slot-name` (default `flink_cdc_dynamic`): the replication slot the
+  job owns. Drop it when decommissioning the pipeline, or the source
+  retains WAL forever.
+- `cdc.heartbeat-table`: name of a heartbeat table inside the captured
+  schema (see the retention section above). Its records advance the slot at
+  the source but are dropped before the sink, so the bookkeeping table
+  never appears in the lake.
+
+Try it locally: `docker compose -f docker-compose.pgdynamic.yml up -d`
+mirrors the MySQL harness (seeded tables, a heartbeat sidecar updating
+`public.cdc_heartbeat` every 10 seconds) with the Flink UI on
+`http://localhost:8099`.
 
 For the full range of versions each Flink CDC 3.6 connector supports, see the
 [Flink CDC documentation](https://nightlies.apache.org/flink/flink-cdc-docs-release-3.6/).

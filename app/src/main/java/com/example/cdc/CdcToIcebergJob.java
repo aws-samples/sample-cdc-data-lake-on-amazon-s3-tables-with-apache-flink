@@ -65,6 +65,13 @@ public final class CdcToIcebergJob {
         // creating the Iceberg tables on the fly. The two paths never mix: a
         // "dynamic" run returns here before any single-table SQL is built.
         final String mode = cdc.getProperty("mode", "single");
+        if ("dynamic".equalsIgnoreCase(mode)
+                && "postgres".equalsIgnoreCase(cdc.getProperty("engine", "mysql"))) {
+            // Whole-schema PostgreSQL: same downstream pipeline as MySQL
+            // dynamic, PostgresIncrementalSource in front.
+            PgDynamicCdcToIcebergJob.run(iceberg, cdc);
+            return;
+        }
         if ("dynamic".equalsIgnoreCase(mode)) {
             DynamicCdcToIcebergJob.run(iceberg, cdc);
             return;

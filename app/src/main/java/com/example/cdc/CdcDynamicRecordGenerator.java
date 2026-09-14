@@ -126,6 +126,24 @@ public final class CdcDynamicRecordGenerator implements DynamicRecordGenerator<S
             return;
         }
 
+        // Deletes carry only what the source's row image provides: with
+        // PostgreSQL's default REPLICA IDENTITY the before-image has the key
+        // columns and null everywhere else. An equality delete matches on the
+        // key fields alone, so drop null non-key columns BEFORE inference --
+        // otherwise a null infers as string and clashes with the column type
+        // the snapshot established (observed: "Cannot change column type:
+        // qty: long -> string" crash-looping the stream phase).
+        if (isDelete && payload instanceof ObjectNode) {
+            final ObjectNode obj = (ObjectNode) payload;
+            final java.util.List<String> dropNullCols = new java.util.ArrayList<>();
+            obj.fieldNames().forEachRemaining(name -> {
+                if (!pk.contains(name) && obj.get(name).isNull()) {
+                    dropNullCols.add(name);
+                }
+            });
+            dropNullCols.forEach(obj::remove);
+        }
+
         final TableIdentifier tableId = TableIdentifier.of(namespace, table);
         // Rewrite Debezium's numeric temporal encodings to ISO strings BEFORE
         // inference, using the semantic-type hints the deserializer read from
