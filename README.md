@@ -32,8 +32,10 @@ One application, three engines. Select with `-c testSource=mysql|postgres|oracle
 (or point the runtime properties at your own database). The Iceberg sink and
 catalog wiring are identical across engines; only the CDC source configuration
 changes (`cdc.engine` runtime property, wired automatically by the CDK test
-source). Whole-database sync, live new-table pickup, and in-place schema
-evolution work the same way on all three.
+source). Mode support differs by engine: dynamic mode (whole-database sync,
+live new-table pickup, in-place schema evolution) is MySQL only; PostgreSQL
+and Oracle run single-table (Table API) mode, one declared table per
+`addInsertSql` statement.
 
 | Engine | Version | Prerequisites on the source |
 |---|---|---|
@@ -46,6 +48,37 @@ so tables with the default `REPLICA IDENTITY` work without any `ALTER TABLE`;
 Oracle bundles the `ojdbc11` driver in the application JAR (the managed
 service has no `/opt/flink/lib`) and mirrors the LogMiner configuration in
 `sql/oracle-setup.sql`.
+
+### Oracle operational notes
+
+**Schema changes on a captured table stall the stream silently.** DDL on a
+table the Oracle connector captures (`ADD`, `DROP`, `RENAME`, `MODIFY`) does
+not crash the job: the job stays `RUNNING` while LogMiner stops capturing
+(`totalCapturedDmlCount` freezes at zero and the mining session dies
+internally). Nothing in the job state signals the failure; the
+`eventTimeLagMs` alarm from the monitoring dashboard is what catches it, as
+lag grows unbounded while everything else reports healthy. Treat schema
+changes on captured Oracle tables as maintenance events: apply the DDL, then
+restart the application with a fresh snapshot
+(`SKIP_RESTORE_FROM_SNAPSHOT`). The re-snapshot picks up all rows, including
+changes made while the stream was stalled.
+
+**Pin the Oracle container image tag.** Floating tags drift across major
+database versions: the `gvenzl/oracle-free` `23-slim` tag now serves Oracle
+Database 26ai, whose version banner does not match the
+`BANNER LIKE 'Oracle Database%'` filter in Debezium 1.9's version probe, and
+the connector fails at startup with "Failed to resolve Oracle database
+version". `sql/oracle-setup.sql` includes a schema-local shadow-view
+workaround; pinning an exact image tag avoids the whole class of drift.
+
+**Declare integer columns at their widest plausible type (applies to
+PostgreSQL single mode too).** Single-table mode maps source columns to the
+declared Flink schema by name, and an integer that outgrows the declared
+type wraps silently instead of failing: a source column widened to `BIGINT`
+carrying 4,000,000,000 lands as -294,967,296 in a column declared `INT`.
+Declare `BIGINT` for any counter or identifier that could ever grow, and
+treat source-side type widening as a maintenance event (update the declared
+schema and redeploy).
 
 ### PostgreSQL replication-slot retention
 
