@@ -196,7 +196,7 @@ public final class DynamicCdcToIcebergJob {
      * s3.access-key-id / s3.secret-access-key) so S3FileIO talks to MinIO
      * instead of real S3. io-impl and client.region are always set.
      */
-    private static CatalogLoader restCatalogLoader(Properties iceberg, String region) {
+    static CatalogLoader restCatalogLoader(Properties iceberg, String region) {
         final Map<String, String> props =
                 new HashMap<>(CdcToIcebergJob.extraCatalogProps(iceberg));
         props.put(CatalogProperties.FILE_IO_IMPL, "org.apache.iceberg.aws.s3.S3FileIO");
